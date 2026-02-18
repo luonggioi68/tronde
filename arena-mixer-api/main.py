@@ -16,7 +16,7 @@ import csv
 import copy
 from openpyxl import Workbook
 
-app = FastAPI(title="Arena Mix - Times New Roman Engine")
+app = FastAPI(title="Arena Mix - Final Layout Engine")
 
 app.add_middleware(
     CORSMiddleware,
@@ -252,15 +252,14 @@ def parse_docx(doc):
             if current_block and current_zone in parsed_data: parsed_data[current_zone].append({'xml': current_block})
             current_zone, current_block = "P4", []; clean_marker_tags(element); parsed_data["P4_header"].append(element); continue
 
-        if current_zone in ["P1", "P2", "P3"]:
+        if current_zone in ["P1", "P2", "P3", "P4"]:
             if re.match(r'^Câu\s+\d+[:.\s]?', text.strip(), re.IGNORECASE):
                 if current_block: parsed_data[current_zone].append({'xml': current_block})
                 current_block = [element]
             else:
                 if current_block: current_block.append(element)
-        elif current_zone == "P4": parsed_data["P4_header"].append(element)
 
-    if current_block and current_zone in ["P1", "P2", "P3"]: parsed_data[current_zone].append({'xml': current_block})
+    if current_block and current_zone in ["P1", "P2", "P3", "P4"]: parsed_data[current_zone].append({'xml': current_block})
     return parsed_data
 
 # =====================================================================
@@ -401,64 +400,92 @@ def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
 def shuffle_engine(doc, parsed_data, config_data):
     ans_key, errors = [], []
     q_counter = 1
-    for z in ["P1", "P2", "P3"]:
-        for q_obj in parsed_data[z]:
-            q_text_short = get_text_from_element(q_obj['xml'][0]).strip()[:40] + "..."
-            if z in ["P1", "P2"]:
-                new_block, ans, err = process_options_and_extract_p1_p2(doc, q_obj['xml'], z, q_text_short)
-                q_obj['xml'] = new_block; q_obj['ans'] = ans
-                if err: errors.append(err)
-            else:
-                new_block, ans = [], None
-                for el in q_obj['xml']:
-                    is_key_line = False
-                    if el.tag.endswith('p'):
-                        match = re.search(r'^\s*(?:Đáp án|ĐS|Key)\s*[:=]\s*(.*)', get_text_from_element(el).strip(), re.IGNORECASE)
-                        if match: ans = match.group(1).strip(); is_key_line = True
-                    if not is_key_line: new_block.append(el)
-                q_obj['xml'] = new_block; q_obj['ans'] = ans or "..."
-                if not ans: errors.append(f"{z} - {q_text_short} CHƯA có dòng đáp án (Key: 123).")
-            
-        random.shuffle(parsed_data[z])
+    
+    for z in ["P1", "P2", "P3", "P4"]:
         
-        if config_data.get("resetChiSo", True):
-            for index, q_dict in enumerate(parsed_data[z]):
-                first_paragraph = q_dict['xml'][0] 
+        # Chỉ xáo trộn và bóc đáp án cho P1, P2, P3
+        if z in ["P1", "P2", "P3"]:
+            for q_obj in parsed_data[z]:
+                q_text_short = get_text_from_element(q_obj['xml'][0]).strip()[:40] + "..."
+                if z in ["P1", "P2"]:
+                    new_block, ans, err = process_options_and_extract_p1_p2(doc, q_obj['xml'], z, q_text_short)
+                    q_obj['xml'] = new_block; q_obj['ans'] = ans
+                    if err: errors.append(err)
+                else:
+                    new_block, ans = [], None
+                    for el in q_obj['xml']:
+                        is_key_line = False
+                        if el.tag.endswith('p'):
+                            match = re.search(r'^\s*(?:Đáp án|ĐS|Key)\s*[:=]\s*(.*)', get_text_from_element(el).strip(), re.IGNORECASE)
+                            if match: ans = match.group(1).strip(); is_key_line = True
+                        if not is_key_line: new_block.append(el)
+                    q_obj['xml'] = new_block; q_obj['ans'] = ans or "..."
+                    if not ans: errors.append(f"{z} - {q_text_short} CHƯA có dòng đáp án (Key: 123).")
+                
+            random.shuffle(parsed_data[z])
+        
+        # =========================================================================================
+        # [MỚI] AI DÒ MÌN "CÂU...": CHẤP NHẬN MỌI FILE WORD BỊ PHÂN MẢNH XML CHO CẢ P4 TỰ LUẬN
+        # =========================================================================================
+        for index, q_dict in enumerate(parsed_data[z]):
+            first_paragraph = q_dict['xml'][0] 
+            p_text = get_text_from_element(first_paragraph)
+            
+            # Quét toàn bộ khối chữ của dòng đầu tiên để dò tìm "Câu X:"
+            match = re.search(r'^(\s*)(Câu\s+\d+[:.]?)', p_text, re.IGNORECASE)
+            if match:
+                leading_spaces = match.group(1)
+                full_match = match.group(2)
+                chars_to_remove = len(leading_spaces) + len(full_match)
+                
+                # Cắt bỏ nhãn "Câu X:" cũ đang nằm rải rác trong nhiều mã XML
                 for run in first_paragraph.findall('.//w:r', namespaces=WORD_NS):
                     t_node = run.find('w:t', namespaces=WORD_NS)
-                    if t_node is not None and t_node.text and re.search(r'Câu\s+\d+', t_node.text, re.IGNORECASE):
-                        match = re.search(r'(Câu\s+\d+[:.]?)', t_node.text, re.IGNORECASE)
-                        if match:
-                            full_match = match.group(1)
-                            clean_text = t_node.text.replace(full_match, '').lstrip()
-                            
-                            new_label = f'{config_data.get("nhanCau", "Câu")} {index + 1}'
-                            separator = ':' if ':' in full_match else ('.' if '.' in full_match else ':')
-                            
-                            new_run = copy.deepcopy(run)
-                            new_t = new_run.find('w:t', namespaces=WORD_NS)
-                            if new_t is not None: 
-                                new_t.text = clean_text
-                                new_t.set(qn('xml:space'), 'preserve')
-                            remove_bold(new_run)
-                            
-                            t_node.text = f"{new_label}{separator} "
-                            t_node.set(qn('xml:space'), 'preserve')
-                            make_run_bold(run)
-                            
-                            if clean_text:
-                                run.addnext(new_run)
-                        break
-            
-        for q_obj in parsed_data[z]:
-            score = "0.25" if z == "P1" else ("0.1 0.25 0.5 1" if z == "P2" else "0.5")
-            ans_key.append({'q_num': q_counter, 'ans': q_obj['ans'], 'score': score, 'zone': z})
-            q_counter += 1
+                    if t_node is not None and t_node.text:
+                        if chars_to_remove > 0:
+                            run_text_len = len(t_node.text)
+                            if run_text_len <= chars_to_remove:
+                                chars_to_remove -= run_text_len
+                                t_node.text = ""
+                            else:
+                                t_node.text = t_node.text[chars_to_remove:].lstrip()
+                                chars_to_remove = 0
+                
+                if config_data.get("resetChiSo", True):
+                    new_label = f'{config_data.get("nhanCau", "Câu")} {index + 1}'
+                else:
+                    new_label = full_match.replace(':', '').replace('.', '').strip()
+                separator = ':' if ':' in full_match else ('.' if '.' in full_match else ':')
+                
+                # Bơm lại nhãn "Câu X:" nguyên khối, in đậm và ép luôn khoảng trắng
+                new_run = OxmlElement('w:r')
+                rPr = OxmlElement('w:rPr')
+                b = OxmlElement('w:b')
+                rPr.append(b)
+                new_run.append(rPr)
+                
+                t = OxmlElement('w:t')
+                t.set(qn('xml:space'), 'preserve')
+                t.text = f"{leading_spaces}{new_label}{separator} "
+                new_run.append(t)
+                
+                pPr = first_paragraph.find(f'{{{WORD_NS["w"]}}}pPr')
+                if pPr is not None:
+                    pPr.addnext(new_run)
+                else:
+                    first_paragraph.insert(0, new_run)
+        
+        # Chỉ tạo key cho 3 phần đầu
+        if z in ["P1", "P2", "P3"]:
+            for q_obj in parsed_data[z]:
+                score = "0.25" if z == "P1" else ("0.1 0.25 0.5 1" if z == "P2" else "0.5")
+                ans_key.append({'q_num': q_counter, 'ans': q_obj['ans'], 'score': score, 'zone': z})
+                q_counter += 1
 
     return parsed_data, ans_key, errors
 
 # =====================================================================
-# MODULE 5: RENDERER & GLOBAL FORMATTING (TIMES NEW ROMAN)
+# MODULE 5: RENDERER & GLOBAL FORMATTING (TIMES NEW ROMAN + SPACING)
 # =====================================================================
 
 def apply_global_formatting(doc):
@@ -475,11 +502,20 @@ def apply_global_formatting(doc):
         xml_str = p._element.xml
         has_complex = 'm:oMath' in xml_str or 'w:drawing' in xml_str or 'v:imagedata' in xml_str or 'w:pict' in xml_str
         
-        # Bỏ qua ép khoảng cách nếu chứa Toán/Hình ảnh để không bị vỡ dòng
+        # AI Quét để nhận biết đâu là dòng Tiêu đề (PHẦN I, PHẦN II...)
+        p_text = p.text.strip().upper()
+        is_header = bool(re.match(r'^(\[P[1-4]\]\s*)?PHẦN\s+(I|II|III|IV|1|2|3|4|MỘT|HAI|BA|BỐN)\b', p_text))
+        
         if not has_complex:
             p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
-            p.paragraph_format.space_after = Pt(0)
-            p.paragraph_format.space_before = Pt(0)
+            
+            # [CẬP NHẬT] Tiêu đề 6pt, còn lại ôm sát 0pt cực chuẩn
+            if is_header:
+                p.paragraph_format.space_before = Pt(6) 
+                p.paragraph_format.space_after = Pt(6)
+            else:
+                p.paragraph_format.space_before = Pt(0) 
+                p.paragraph_format.space_after = Pt(0)
             
         # Ép TẤT CẢ các chữ về TIMES NEW ROMAN
         for run in p.runs:
@@ -535,14 +571,13 @@ def render_template(doc, parsed_data, config_data, current_ma_de):
     for p in temp_doc.paragraphs:
         body.append(p._element)
 
-    # GỌI HÀM ÉP FONT TIMES NEW ROMAN CHO TOÀN BỘ BODY
+    # CHUẨN HOÁ SPACING & FONT
     apply_global_formatting(doc)
 
     for section in doc.sections:
         header = section.header
         for p in header.paragraphs: p.text = "" 
         
-        # XỬ LÝ FONT CHO FOOTER RIÊNG BIỆT
         footer = section.footer
         footer.is_linked_to_previous = False
         for p in footer.paragraphs: p.text = "" 
