@@ -44,6 +44,7 @@ def make_run_bold(r):
     if b is None:
         b = OxmlElement('w:b')
         rPr.append(b)
+    # Thêm bCs để ép in đậm cả các font có dấu Tiếng Việt
     bCs = rPr.find(f'{{{WORD_NS["w"]}}}bCs')
     if bCs is None:
         bCs = OxmlElement('w:bCs')
@@ -257,7 +258,10 @@ def parse_docx(doc):
                 if current_block: parsed_data[current_zone].append({'xml': current_block})
                 current_block = [element]
             else:
-                if current_block: current_block.append(element)
+                if current_block: 
+                    current_block.append(element)
+                else:
+                    parsed_data[f"{current_zone}_header"].append(element)
 
     if current_block and current_zone in ["P1", "P2", "P3", "P4"]: parsed_data[current_zone].append({'xml': current_block})
     return parsed_data
@@ -402,8 +406,6 @@ def shuffle_engine(doc, parsed_data, config_data):
     q_counter = 1
     
     for z in ["P1", "P2", "P3", "P4"]:
-        
-        # Chỉ xáo trộn và bóc đáp án cho P1, P2, P3
         if z in ["P1", "P2", "P3"]:
             for q_obj in parsed_data[z]:
                 q_text_short = get_text_from_element(q_obj['xml'][0]).strip()[:40] + "..."
@@ -424,21 +426,22 @@ def shuffle_engine(doc, parsed_data, config_data):
                 
             random.shuffle(parsed_data[z])
         
-        # =========================================================================================
-        # [MỚI] AI DÒ MÌN "CÂU...": CHẤP NHẬN MỌI FILE WORD BỊ PHÂN MẢNH XML CHO CẢ P4 TỰ LUẬN
-        # =========================================================================================
+        # =====================================================================
+        # [HOÀN THIỆN TỐI ĐA] CHỈ SỬA ĐỒNG BỘ "CÂU X:" (Áp dụng cho cả 4 phần)
+        # =====================================================================
         for index, q_dict in enumerate(parsed_data[z]):
             first_paragraph = q_dict['xml'][0] 
             p_text = get_text_from_element(first_paragraph)
             
-            # Quét toàn bộ khối chữ của dòng đầu tiên để dò tìm "Câu X:"
-            match = re.search(r'^(\s*)(Câu\s+\d+[:.]?)', p_text, re.IGNORECASE)
+            # Quét gom toàn bộ chuỗi "Câu X", theo sau là bất kỳ dấu chấm, hai chấm hay khoảng trắng nào
+            match = re.search(r'^(\s*)(Câu\s+\d+)([\s:.\-\)]*)', p_text, re.IGNORECASE)
             if match:
                 leading_spaces = match.group(1)
-                full_match = match.group(2)
-                chars_to_remove = len(leading_spaces) + len(full_match)
+                full_match_str = match.group(0) # Chứa toàn bộ "Câu X." hoặc "Câu X:" cũ
+                chars_to_remove = len(full_match_str)
                 
-                # Cắt bỏ nhãn "Câu X:" cũ đang nằm rải rác trong nhiều mã XML
+                # Cày nát mọi mảnh XML để dọn dẹp nhãn "Câu X" cũ (dù bị Word băm nát tới đâu)
+                has_stripped_remainder = False
                 for run in first_paragraph.findall('.//w:r', namespaces=WORD_NS):
                     t_node = run.find('w:t', namespaces=WORD_NS)
                     if t_node is not None and t_node.text:
@@ -450,18 +453,39 @@ def shuffle_engine(doc, parsed_data, config_data):
                             else:
                                 t_node.text = t_node.text[chars_to_remove:].lstrip()
                                 chars_to_remove = 0
+                                if t_node.text: has_stripped_remainder = True
+                        elif not has_stripped_remainder:
+                            # Cắt nốt khoảng trắng dư thừa
+                            stripped = t_node.text.lstrip()
+                            t_node.text = stripped
+                            if t_node.text: has_stripped_remainder = True
                 
+                # Cấp số thứ tự mới hoặc giữ nguyên số cũ
                 if config_data.get("resetChiSo", True):
                     new_label = f'{config_data.get("nhanCau", "Câu")} {index + 1}'
                 else:
-                    new_label = full_match.replace(':', '').replace('.', '').strip()
-                separator = ':' if ':' in full_match else ('.' if '.' in full_match else ':')
+                    num_match = re.search(r'\d+', match.group(2))
+                    match_num = num_match.group() if num_match else str(index + 1)
+                    new_label = f'{config_data.get("nhanCau", "Câu")} {match_num}'
                 
-                # Bơm lại nhãn "Câu X:" nguyên khối, in đậm và ép luôn khoảng trắng
+                # [QUAN TRỌNG NHẤT]: Cưỡng chế ÉP KÝ TỰ (:) THAY VÌ DẤU CHẤM (.)
+                separator = ':'
+                
+                # Tạo node mới tinh, IN ĐẬM và ép FONT TIMES NEW ROMAN
                 new_run = OxmlElement('w:r')
                 rPr = OxmlElement('w:rPr')
+                
                 b = OxmlElement('w:b')
+                bCs = OxmlElement('w:bCs')
                 rPr.append(b)
+                rPr.append(bCs)
+                
+                rFonts = OxmlElement('w:rFonts')
+                rFonts.set(qn('w:ascii'), 'Times New Roman')
+                rFonts.set(qn('w:hAnsi'), 'Times New Roman')
+                rFonts.set(qn('w:cs'), 'Times New Roman')
+                rPr.append(rFonts)
+                
                 new_run.append(rPr)
                 
                 t = OxmlElement('w:t')
@@ -475,7 +499,6 @@ def shuffle_engine(doc, parsed_data, config_data):
                 else:
                     first_paragraph.insert(0, new_run)
         
-        # Chỉ tạo key cho 3 phần đầu
         if z in ["P1", "P2", "P3"]:
             for q_obj in parsed_data[z]:
                 score = "0.25" if z == "P1" else ("0.1 0.25 0.5 1" if z == "P2" else "0.5")
@@ -485,7 +508,7 @@ def shuffle_engine(doc, parsed_data, config_data):
     return parsed_data, ans_key, errors
 
 # =====================================================================
-# MODULE 5: RENDERER & GLOBAL FORMATTING (TIMES NEW ROMAN + SPACING)
+# MODULE 5: RENDERER & GLOBAL FORMATTING
 # =====================================================================
 
 def apply_global_formatting(doc):
@@ -502,14 +525,19 @@ def apply_global_formatting(doc):
         xml_str = p._element.xml
         has_complex = 'm:oMath' in xml_str or 'w:drawing' in xml_str or 'v:imagedata' in xml_str or 'w:pict' in xml_str
         
-        # AI Quét để nhận biết đâu là dòng Tiêu đề (PHẦN I, PHẦN II...)
+        # Nhận diện dòng chứa các Tiêu đề Chính (PHẦN I, PHẦN II...)
         p_text = p.text.strip().upper()
-        is_header = bool(re.match(r'^(\[P[1-4]\]\s*)?PHẦN\s+(I|II|III|IV|1|2|3|4|MỘT|HAI|BA|BỐN)\b', p_text))
-        
+        is_header = False
+        if (p_text.startswith("PHẦN I") or p_text.startswith("PHẦN 1") or p_text.startswith("PHẦN MỘT") or 
+            p_text.startswith("PHẦN II") or p_text.startswith("PHẦN 2") or p_text.startswith("PHẦN HAI") or 
+            p_text.startswith("PHẦN III") or p_text.startswith("PHẦN 3") or p_text.startswith("PHẦN BA") or 
+            p_text.startswith("PHẦN IV") or p_text.startswith("PHẦN 4") or p_text.startswith("PHẦN BỐN")):
+            is_header = True
+            
         if not has_complex:
             p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
             
-            # [CẬP NHẬT] Tiêu đề 6pt, còn lại ôm sát 0pt cực chuẩn
+            # [CHỈ ĐỊNH]: CHỈ DUY NHẤT HEADER MỚI ĐƯỢC 6PT, CÒN LẠI ÔM SÁT 0PT NHƯ CŨ
             if is_header:
                 p.paragraph_format.space_before = Pt(6) 
                 p.paragraph_format.space_after = Pt(6)
@@ -526,7 +554,6 @@ def apply_global_formatting(doc):
             rFonts.set(qn('w:hAnsi'), 'Times New Roman')
             rFonts.set(qn('w:cs'), 'Times New Roman')
             
-            # Ép về cỡ 12 (Trừ trường hợp chữ Mã đề đang là cỡ 14)
             if run.font.size != Pt(14):
                 run.font.size = Pt(12)
 
@@ -571,7 +598,6 @@ def render_template(doc, parsed_data, config_data, current_ma_de):
     for p in temp_doc.paragraphs:
         body.append(p._element)
 
-    # CHUẨN HOÁ SPACING & FONT
     apply_global_formatting(doc)
 
     for section in doc.sections:
@@ -747,7 +773,7 @@ async def mix_docx_endpoint(file: UploadFile = File(...), config: str = Form(...
         return StreamingResponse(
             zip_buffer, 
             media_type="application/zip", 
-            headers={'Content-Disposition': 'attachment; filename="Tap_De_Thi.zip"'}
+            headers={'Content-Disposition': 'attachment; filename="De_Thi.zip"'}
         )
 
     except Exception as e:
