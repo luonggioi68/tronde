@@ -278,7 +278,7 @@ def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
     for el in block:
         if el.tag.endswith('p'):
             text = get_text_from_element(el)
-            match = re.match(pattern, text, re.IGNORECASE)
+            match = re.match(pattern, text)
             if match:
                 if current_opt is not None: options.append(current_opt)
                 current_opt = {'xml': [el], 'is_correct': False}
