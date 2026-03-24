@@ -271,7 +271,7 @@ def parse_docx(doc):
 # =====================================================================
 def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
     # 1. Cập nhật pattern để bắt chính xác dấu * ở đầu hoặc ngay sau nhãn (ví dụ: *A. hoặc A.*)
-    pattern = r'^\s*(\*|∗)?\s*([A-D])[.)]\s*(\*|∗)?' if zone_type == "P1" else r'^\s*(\*|∗)?\s*([a-d])[.)]\s*(\*|∗)?'
+    pattern = r'^\s*(\*|∗)?\s*([A-D])[.)](\*|∗)?' if zone_type == "P1" else r'^\s*(\*|∗)?\s*([a-d])[.)](\*|∗)?'
     labels = ['A', 'B', 'C', 'D'] if zone_type == "P1" else ['a', 'b', 'c', 'd']
     stem, options, current_opt = [], [], None
     
@@ -339,7 +339,7 @@ def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
             if t_node is not None and t_node.text:
                 if not label_replaced:
                     # 2. Thay đổi sub_pattern để nó "nuốt" luôn cả dấu * xung quanh A. B. C. D. và xóa một lần
-                    sub_pattern = r'^[\s]*(\*|∗)?[\s]*([A-D]|[a-d])[.)][\s]*(\*|∗)?'
+                    sub_pattern = r'^[\s]*(\*|∗)?[\s]*([A-D]|[a-d])[.)](\*|∗)?'
                     if re.search(sub_pattern, t_node.text, re.IGNORECASE):
                         separator = '.' if zone_type == "P1" else ')'
                         
