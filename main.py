@@ -44,7 +44,6 @@ def make_run_bold(r):
     if b is None:
         b = OxmlElement('w:b')
         rPr.append(b)
-    # Thêm bCs để ép in đậm cả các font có dấu Tiếng Việt
     bCs = rPr.find(f'{{{WORD_NS["w"]}}}bCs')
     if bCs is None:
         bCs = OxmlElement('w:bCs')
@@ -270,7 +269,6 @@ def parse_docx(doc):
 # MODULE 4: SHUFFLE & FLEXIBLE LAYOUT
 # =====================================================================
 def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
-    # Cho phép khoảng trắng trước dấu chấm (.) để tránh lỗi định dạng A .
     pattern = r'^\s*(\*|∗)?\s*([A-D])\s*[.)](\*|∗)?' if zone_type == "P1" else r'^\s*(\*|∗)?\s*([a-d])\s*[.)](\*|∗)?'
     labels = ['A', 'B', 'C', 'D'] if zone_type == "P1" else ['a', 'b', 'c', 'd']
     stem, options, current_opt = [], [], None
@@ -278,7 +276,6 @@ def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
     for el in block:
         if el.tag.endswith('p'):
             text = get_text_from_element(el)
-            # KHÔNG dùng re.IGNORECASE ở đây để code "a.insert" không bị bắt nhầm thành đáp án
             match = re.match(pattern, text)
             if match:
                 if current_opt is not None: options.append(current_opt)
@@ -325,17 +322,14 @@ def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
     random.shuffle(options)
     ans_result = ""
 
-    # [FIX] Thuật toán cày nát XML dọn sạch nhãn A, B, C, D cũ để tránh lỗi A, A, C, D
     for idx, opt in enumerate(options):
         first_p = opt['xml'][0]
         p_text = get_text_from_element(first_p)
         
-        # Nâng cấp thành re.search để xuyên thủng mọi ký tự ẩn/rác của Word ở đầu dòng
         search_pattern = r'^.*?(\*|∗)?\s*([A-D]|[a-d])\s*[.)](\*|∗)?'
         match = re.search(search_pattern, p_text, re.IGNORECASE)
         
         if match:
-            # Lấy chính xác điểm kết thúc của nhãn (bao gồm cả khoảng trắng) để cắt
             chars_to_remove = match.end()
             has_stripped_remainder = False
             
@@ -357,7 +351,19 @@ def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
                         stripped = t_node.text.lstrip()
                         t_node.text = stripped
                         if t_node.text: has_stripped_remainder = True
-            
+
+            # ========================================================
+            # [FIX GAPS]: DIỆT SẠCH TAB VÀ THỤT LỀ Ở ĐÁP ÁN
+            # ========================================================
+            for run in first_p.findall('.//w:r', namespaces=WORD_NS):
+                for tab in run.findall('.//w:tab', namespaces=WORD_NS):
+                    run.remove(tab)
+            pPr_opt = first_p.find(f'{{{WORD_NS["w"]}}}pPr')
+            if pPr_opt is not None:
+                ind = pPr_opt.find(f'{{{WORD_NS["w"]}}}ind')
+                if ind is not None: pPr_opt.remove(ind)
+            # ========================================================
+
             separator = '.' if zone_type == "P1" else ')'
             new_run = OxmlElement('w:r')
             rPr = OxmlElement('w:rPr')
@@ -461,21 +467,16 @@ def shuffle_engine(doc, parsed_data, config_data):
                 
             random.shuffle(parsed_data[z])
         
-        # =====================================================================
-        # [HOÀN THIỆN TỐI ĐA] CHỈ SỬA ĐỒNG BỘ "CÂU X:" (Áp dụng cho cả 4 phần)
-        # =====================================================================
         for index, q_dict in enumerate(parsed_data[z]):
             first_paragraph = q_dict['xml'][0] 
             p_text = get_text_from_element(first_paragraph)
             
-            # Quét gom toàn bộ chuỗi "Câu X", theo sau là bất kỳ dấu chấm, hai chấm hay khoảng trắng nào
             match = re.search(r'^(\s*)(Câu\s+\d+)([\s:.\-\)]*)', p_text, re.IGNORECASE)
             if match:
                 leading_spaces = match.group(1)
-                full_match_str = match.group(0) # Chứa toàn bộ "Câu X." hoặc "Câu X:" cũ
+                full_match_str = match.group(0) 
                 chars_to_remove = len(full_match_str)
                 
-                # Cày nát mọi mảnh XML để dọn dẹp nhãn "Câu X" cũ (dù bị Word băm nát tới đâu)
                 has_stripped_remainder = False
                 for run in first_paragraph.findall('.//w:r', namespaces=WORD_NS):
                     t_node = run.find('w:t', namespaces=WORD_NS)
@@ -490,12 +491,22 @@ def shuffle_engine(doc, parsed_data, config_data):
                                 chars_to_remove = 0
                                 if t_node.text: has_stripped_remainder = True
                         elif not has_stripped_remainder:
-                            # Cắt nốt khoảng trắng dư thừa
                             stripped = t_node.text.lstrip()
                             t_node.text = stripped
                             if t_node.text: has_stripped_remainder = True
+
+                # ========================================================
+                # [FIX GAPS]: DIỆT SẠCH TAB VÀ THỤT LỀ Ở CÂU HỎI
+                # ========================================================
+                for run in first_paragraph.findall('.//w:r', namespaces=WORD_NS):
+                    for tab in run.findall('.//w:tab', namespaces=WORD_NS):
+                        run.remove(tab)
+                pPr_q = first_paragraph.find(f'{{{WORD_NS["w"]}}}pPr')
+                if pPr_q is not None:
+                    ind = pPr_q.find(f'{{{WORD_NS["w"]}}}ind')
+                    if ind is not None: pPr_q.remove(ind)
+                # ========================================================
                 
-                # Cấp số thứ tự mới hoặc giữ nguyên số cũ
                 if config_data.get("resetChiSo", True):
                     new_label = f'{config_data.get("nhanCau", "Câu")} {index + 1}'
                 else:
@@ -503,10 +514,8 @@ def shuffle_engine(doc, parsed_data, config_data):
                     match_num = num_match.group() if num_match else str(index + 1)
                     new_label = f'{config_data.get("nhanCau", "Câu")} {match_num}'
                 
-                # [QUAN TRỌNG NHẤT]: Cưỡng chế ÉP KÝ TỰ (:) THAY VÌ DẤU CHẤM (.)
                 separator = ':'
                 
-                # Tạo node mới tinh, IN ĐẬM và ép FONT TIMES NEW ROMAN
                 new_run = OxmlElement('w:r')
                 rPr = OxmlElement('w:rPr')
                 
@@ -560,7 +569,6 @@ def apply_global_formatting(doc):
         xml_str = p._element.xml
         has_complex = 'm:oMath' in xml_str or 'w:drawing' in xml_str or 'v:imagedata' in xml_str or 'w:pict' in xml_str
         
-        # Nhận diện dòng chứa các Tiêu đề Chính (PHẦN I, PHẦN II...)
         p_text = p.text.strip().upper()
         is_header = False
         if (p_text.startswith("PHẦN I") or p_text.startswith("PHẦN 1") or p_text.startswith("PHẦN MỘT") or 
@@ -571,8 +579,6 @@ def apply_global_formatting(doc):
             
         if not has_complex:
             p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
-            
-            # [CHỈ ĐỊNH]: CHỈ DUY NHẤT HEADER MỚI ĐƯỢC 6PT, CÒN LẠI ÔM SÁT 0PT NHƯ CŨ
             if is_header:
                 p.paragraph_format.space_before = Pt(6) 
                 p.paragraph_format.space_after = Pt(6)
@@ -580,7 +586,6 @@ def apply_global_formatting(doc):
                 p.paragraph_format.space_before = Pt(0) 
                 p.paragraph_format.space_after = Pt(0)
             
-        # Ép TẤT CẢ các chữ về TIMES NEW ROMAN
         for run in p.runs:
             run.font.name = 'Times New Roman'
             rPr = run._element.get_or_add_rPr()
@@ -703,9 +708,6 @@ async def mix_docx_endpoint(file: UploadFile = File(...), config: str = Form(...
                 final_doc.save(doc_buffer)
                 zip_file.writestr(f"De_Ma_{ma_de}.docx", doc_buffer.getvalue())
             
-            # ====================================================================
-            # 1. FILE EXCEL: ĐÁP ÁN DỌC 
-            # ====================================================================
             wb_doc = Workbook()
             ws_doc = wb_doc.active
             ws_doc.title = "Dap An Doc"
@@ -719,9 +721,6 @@ async def mix_docx_endpoint(file: UploadFile = File(...), config: str = Form(...
             doc_excel_buffer.seek(0)
             zip_file.writestr("DapAn_ChiTiet_Doc.xlsx", doc_excel_buffer.read())
 
-            # ====================================================================
-            # 2. FILE EXCEL: ĐÁP ÁN NGANG 
-            # ====================================================================
             wb_ngang = Workbook()
             ws_ngang = wb_ngang.active
             ws_ngang.title = "Dap An Ngang"
@@ -744,9 +743,6 @@ async def mix_docx_endpoint(file: UploadFile = File(...), config: str = Form(...
             ngang_excel_buffer.seek(0)
             zip_file.writestr("DapAn_DeTron_Ngang.xlsx", ngang_excel_buffer.read())
 
-            # ====================================================================
-            # 3. FILE EXCEL: CHUẨN OLM 
-            # ====================================================================
             wb_olm = Workbook()
             ws_olm = wb_olm.active
             ws_olm.title = "Dap An OLM"
