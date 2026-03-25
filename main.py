@@ -270,21 +270,20 @@ def parse_docx(doc):
 # MODULE 4: SHUFFLE & FLEXIBLE LAYOUT
 # =====================================================================
 def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
-    # 1. Cập nhật pattern để bắt chính xác dấu * ở đầu hoặc ngay sau nhãn (ví dụ: *A. hoặc A.*)
-    pattern = r'^\s*(\*|∗)?\s*([A-D])[.)](\*|∗)?' if zone_type == "P1" else r'^\s*(\*|∗)?\s*([a-d])[.)](\*|∗)?'
+    # [FIX] Cho phép khoảng trắng trước dấu chấm (.) để tránh lỗi định dạng A .
+    pattern = r'^\s*(\*|∗)?\s*([A-D])\s*[.)](\*|∗)?' if zone_type == "P1" else r'^\s*(\*|∗)?\s*([a-d])\s*[.)](\*|∗)?'
     labels = ['A', 'B', 'C', 'D'] if zone_type == "P1" else ['a', 'b', 'c', 'd']
     stem, options, current_opt = [], [], None
     
     for el in block:
         if el.tag.endswith('p'):
             text = get_text_from_element(el)
+            # [FIX] XÓA cờ re.IGNORECASE ở đây để code "a.insert" không bị bắt nhầm thành đáp án
             match = re.match(pattern, text)
             if match:
                 if current_opt is not None: options.append(current_opt)
                 current_opt = {'xml': [el], 'is_correct': False}
                 
-                # CHỈ check đúng nếu có * ở NGAY TRƯỚC (group 1) hoặc SAU (group 3) chữ cái. 
-                # Hoặc có chữ (đúng) trong nội dung. Bỏ hẳn việc check '*' tự do toàn cục.
                 if match.group(1) or match.group(3) or re.search(r'\(\s*đ(?:úng)?\s*\)', text, re.IGNORECASE):
                     current_opt['is_correct'] = True
                 
@@ -292,15 +291,12 @@ def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
                     has_format = check_and_clean_answer_formatting(run)
                     t_node = run.find('w:t', namespaces=WORD_NS)
                     if t_node is not None and t_node.text:
-                        # KHÔNG xóa * ở đây nữa để bảo toàn câu lệnh SQL. 
-                        # Chỉ xóa chữ (đúng) hoặc (đ) nếu có.
                         t_node.text = re.sub(r'\(\s*đ(?:úng)?\s*\)', '', t_node.text, flags=re.IGNORECASE)
                         if has_format: current_opt['is_correct'] = True
             else:
                 if current_opt is not None:
                     current_opt['xml'].append(el)
                     p_text = get_text_from_element(el)
-                    # Nội dung phụ chỉ check chữ (đúng), KHÔNG check '*'
                     if re.search(r'\(\s*đ(?:úng)?\s*\)', p_text, re.IGNORECASE):
                          current_opt['is_correct'] = True
                     for run in el.findall('.//w:r', namespaces=WORD_NS):
@@ -328,52 +324,64 @@ def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
             
     random.shuffle(options)
     ans_result = ""
-    
+
+    # [FIX] Thuật toán cày nát XML dọn sạch nhãn A, B, C, D cũ để tránh lỗi A, A, C, D
     for idx, opt in enumerate(options):
         first_p = opt['xml'][0]
-        label_replaced = False
-        expecting_trailing_star = False # Biến cờ xử lý trường hợp dấu * bị tách run
+        p_text = get_text_from_element(first_p)
         
-        for run in first_p.findall('.//w:r', namespaces=WORD_NS):
-            t_node = run.find('w:t', namespaces=WORD_NS)
-            if t_node is not None and t_node.text:
-                if not label_replaced:
-                    # 2. Thay đổi sub_pattern để nó "nuốt" luôn cả dấu * xung quanh A. B. C. D. và xóa một lần
-                    sub_pattern = r'^[\s]*(\*|∗)?[\s]*([A-D]|[a-d])[.)](\*|∗)?'
-                    if re.search(sub_pattern, t_node.text, re.IGNORECASE):
-                        separator = '.' if zone_type == "P1" else ')'
-                        
-                        match_sub = re.search(sub_pattern, t_node.text, re.IGNORECASE)
-                        if match_sub and not match_sub.group(3):
-                            expecting_trailing_star = True
-
-                        clean_text = re.sub(sub_pattern, '', t_node.text, count=1, flags=re.IGNORECASE).lstrip()
-                        
-                        new_run = copy.deepcopy(run)
-                        new_t = new_run.find('w:t', namespaces=WORD_NS)
-                        if new_t is not None: 
-                            new_t.text = clean_text
-                            new_t.set(qn('xml:space'), 'preserve')
-                        remove_bold(new_run)
-                        
-                        t_node.text = f"{labels[idx]}{separator} "
-                        t_node.set(qn('xml:space'), 'preserve') 
-                        make_run_bold(run)
-                        
-                        if clean_text: run.addnext(new_run)
-                        label_replaced = True
-                    else:
-                        # Dọn dẹp cục run rác chỉ chứa dấu * ở đầu dòng (do Word tự cắt vụn XML)
-                        if re.match(r'^[\s]*(\*|∗)[\s]*$', t_node.text):
+        match = re.match(r'^[\s]*(\*|∗)?[\s]*([A-D]|[a-d])[\s]*[.)](\*|∗)?', p_text, re.IGNORECASE)
+        
+        if match:
+            chars_to_remove = len(match.group(0))
+            has_stripped_remainder = False
+            
+            for run in first_p.findall('.//w:r', namespaces=WORD_NS):
+                t_node = run.find('w:t', namespaces=WORD_NS)
+                if t_node is not None and t_node.text:
+                    if chars_to_remove > 0:
+                        run_text_len = len(t_node.text)
+                        if run_text_len <= chars_to_remove:
+                            chars_to_remove -= run_text_len
                             t_node.text = ""
-                elif expecting_trailing_star:
-                    # Bắt mảnh * bị rớt lại ngay sau chữ A.
-                    if re.match(r'^[\s]*(\*|∗)[\s]*$', t_node.text):
-                        t_node.text = ""
-                        expecting_trailing_star = False
-                    elif t_node.text.strip() != "":
-                        expecting_trailing_star = False
-                        
+                            remove_bold(run) 
+                        else:
+                            t_node.text = t_node.text[chars_to_remove:].lstrip()
+                            chars_to_remove = 0
+                            remove_bold(run) 
+                            if t_node.text: has_stripped_remainder = True
+                    elif not has_stripped_remainder:
+                        stripped = t_node.text.lstrip()
+                        t_node.text = stripped
+                        if t_node.text: has_stripped_remainder = True
+            
+            separator = '.' if zone_type == "P1" else ')'
+            new_run = OxmlElement('w:r')
+            rPr = OxmlElement('w:rPr')
+            b = OxmlElement('w:b')
+            bCs = OxmlElement('w:bCs')
+            rPr.append(b)
+            rPr.append(bCs)
+            
+            rFonts = OxmlElement('w:rFonts')
+            rFonts.set(qn('w:ascii'), 'Times New Roman')
+            rFonts.set(qn('w:hAnsi'), 'Times New Roman')
+            rFonts.set(qn('w:cs'), 'Times New Roman')
+            rPr.append(rFonts)
+            
+            new_run.append(rPr)
+            
+            t = OxmlElement('w:t')
+            t.set(qn('xml:space'), 'preserve')
+            t.text = f"{labels[idx]}{separator} "
+            new_run.append(t)
+            
+            pPr = first_p.find(f'{{{WORD_NS["w"]}}}pPr')
+            if pPr is not None:
+                pPr.addnext(new_run)
+            else:
+                first_p.insert(0, new_run)
+
         if zone_type == "P1":
             if opt['is_correct']: ans_result = labels[idx]
         else:
@@ -424,6 +432,7 @@ def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
         new_block.append(tbl_element)
 
     return new_block, ans_result or "A", None
+
 def shuffle_engine(doc, parsed_data, config_data):
     ans_key, errors = [], []
     q_counter = 1
