@@ -239,16 +239,17 @@ def parse_docx(doc):
         if text_upper in ["HẾT", "---HẾT---", "HẾT.", "-HẾT-", "HẾT"]:
             continue
 
-        if "[P1]" in text_upper or re.match(r'^PHẦN\s+(I|1|MỘT)\b', text_upper):
+        # NÂNG CẤP: Dùng re.search để bắt từ khoá "PHẦN" linh hoạt hơn, không bị trượt khi thiếu thẻ [P]
+        if "[P1]" in text_upper or re.search(r'\bPHẦN\s+(I|1|MỘT)\b', text_upper):
             if current_block and current_zone in parsed_data: parsed_data[current_zone].append({'xml': current_block})
             current_zone, current_block = "P1", []; clean_marker_tags(element); parsed_data["P1_header"].append(element); continue
-        elif "[P2]" in text_upper or re.match(r'^PHẦN\s+(II|2|HAI)\b', text_upper):
+        elif "[P2]" in text_upper or re.search(r'\bPHẦN\s+(II|2|HAI)\b', text_upper):
             if current_block and current_zone in parsed_data: parsed_data[current_zone].append({'xml': current_block})
             current_zone, current_block = "P2", []; clean_marker_tags(element); parsed_data["P2_header"].append(element); continue
-        elif "[P3]" in text_upper or re.match(r'^PHẦN\s+(III|3|BA)\b', text_upper):
+        elif "[P3]" in text_upper or re.search(r'\bPHẦN\s+(III|3|BA)\b', text_upper):
             if current_block and current_zone in parsed_data: parsed_data[current_zone].append({'xml': current_block})
             current_zone, current_block = "P3", []; clean_marker_tags(element); parsed_data["P3_header"].append(element); continue
-        elif "[P4]" in text_upper or re.match(r'^PHẦN\s+(IV|4|BỐN)\b', text_upper):
+        elif "[P4]" in text_upper or re.search(r'\bPHẦN\s+(IV|4|BỐN)\b', text_upper):
             if current_block and current_zone in parsed_data: parsed_data[current_zone].append({'xml': current_block})
             current_zone, current_block = "P4", []; clean_marker_tags(element); parsed_data["P4_header"].append(element); continue
 
@@ -271,7 +272,8 @@ def parse_docx(doc):
 def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
     pattern = r'^\s*(\*|∗)?\s*([A-D])\s*[.)](\*|∗)?' if zone_type == "P1" else r'^\s*(\*|∗)?\s*([a-d])\s*[.)](\*|∗)?'
     labels = ['A', 'B', 'C', 'D'] if zone_type == "P1" else ['a', 'b', 'c', 'd']
-    stem, options, current_opt = [], [], None
+    stem, options, current_opt = [], None, None
+    options = []
     
     for el in block:
         if el.tag.endswith('p'):
@@ -448,12 +450,15 @@ def shuffle_engine(doc, parsed_data, config_data):
     
     for z in ["P1", "P2", "P3", "P4"]:
         if z in ["P1", "P2", "P3"]:
-            for q_obj in parsed_data[z]:
+            # NÂNG CẤP: Dùng enumerate để đánh số thứ tự idx, giúp định vị câu lỗi chính xác
+            for idx, q_obj in enumerate(parsed_data[z]):
                 q_text_short = get_text_from_element(q_obj['xml'][0]).strip()[:40] + "..."
                 if z in ["P1", "P2"]:
                     new_block, ans, err = process_options_and_extract_p1_p2(doc, q_obj['xml'], z, q_text_short)
                     q_obj['xml'] = new_block; q_obj['ans'] = ans
-                    if err: errors.append(err)
+                    if err: 
+                        err_detail = err.replace(f"{z} - ", f"Vùng {z} (Câu thứ {idx + 1} máy nhận diện) - ")
+                        errors.append(err_detail)
                 else:
                     new_block, ans = [], None
                     for el in q_obj['xml']:
@@ -463,7 +468,8 @@ def shuffle_engine(doc, parsed_data, config_data):
                             if match: ans = match.group(1).strip(); is_key_line = True
                         if not is_key_line: new_block.append(el)
                     q_obj['xml'] = new_block; q_obj['ans'] = ans or "..."
-                    if not ans: errors.append(f"{z} - {q_text_short} CHƯA có dòng đáp án (Key: 123).")
+                    if not ans: 
+                        errors.append(f"Vùng {z} (Câu thứ {idx + 1} máy nhận diện) - {q_text_short} CHƯA có dòng đáp án (Key: 123).")
                 
             random.shuffle(parsed_data[z])
         
