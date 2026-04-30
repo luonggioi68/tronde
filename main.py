@@ -75,8 +75,8 @@ def check_and_clean_answer_formatting(run_element):
 
 def clean_marker_tags(element):
     text = get_text_from_element(element)
-    if re.search(r'\[P[1-4]\]', text, re.IGNORECASE):
-        cleaned_text = re.sub(r'\[P[1-4]\]\s*', '', text, flags=re.IGNORECASE)
+    if re.search(r'\[P[1-4]\]|\[G\]|\[/G\]', text, re.IGNORECASE):
+        cleaned_text = re.sub(r'\[P[1-4]\]\s*|\[G\]\s*|\[/G\]\s*', '', text, flags=re.IGNORECASE)
         runs = element.findall('.//w:r', namespaces=WORD_NS)
         first = True
         for run in runs:
@@ -231,6 +231,8 @@ def parse_docx(doc):
     
     current_zone = "trash" 
     current_block = []
+    in_group = False
+    current_group = None
 
     for element in body:
         text = get_text_from_element(element)
@@ -239,28 +241,67 @@ def parse_docx(doc):
         if text_upper in ["HẾT", "---HẾT---", "HẾT.", "-HẾT-", "HẾT"]:
             continue
 
-        if "[P1]" in text_upper or re.match(r'^PHẦN\s+(I|1|MỘT)\b', text_upper):
+        if "[P1]" in text_upper or re.search(r'\bPHẦN\s+(I|1|MỘT)\b', text_upper):
             if current_block and current_zone in parsed_data: parsed_data[current_zone].append({'xml': current_block})
             current_zone, current_block = "P1", []; clean_marker_tags(element); parsed_data["P1_header"].append(element); continue
-        elif "[P2]" in text_upper or re.match(r'^PHẦN\s+(II|2|HAI)\b', text_upper):
+        elif "[P2]" in text_upper or re.search(r'\bPHẦN\s+(II|2|HAI)\b', text_upper):
             if current_block and current_zone in parsed_data: parsed_data[current_zone].append({'xml': current_block})
             current_zone, current_block = "P2", []; clean_marker_tags(element); parsed_data["P2_header"].append(element); continue
-        elif "[P3]" in text_upper or re.match(r'^PHẦN\s+(III|3|BA)\b', text_upper):
+        elif "[P3]" in text_upper or re.search(r'\bPHẦN\s+(III|3|BA)\b', text_upper):
             if current_block and current_zone in parsed_data: parsed_data[current_zone].append({'xml': current_block})
             current_zone, current_block = "P3", []; clean_marker_tags(element); parsed_data["P3_header"].append(element); continue
-        elif "[P4]" in text_upper or re.match(r'^PHẦN\s+(IV|4|BỐN)\b', text_upper):
+        elif "[P4]" in text_upper or re.search(r'\bPHẦN\s+(IV|4|BỐN)\b', text_upper):
             if current_block and current_zone in parsed_data: parsed_data[current_zone].append({'xml': current_block})
             current_zone, current_block = "P4", []; clean_marker_tags(element); parsed_data["P4_header"].append(element); continue
 
+        # Phát hiện bắt đầu nhóm [G]
+        if "[G]" in text_upper:
+            if current_block and current_zone in parsed_data:
+                parsed_data[current_zone].append({'xml': current_block})
+                current_block = []
+            in_group = True
+            current_group = {'type': 'group', 'passage': [], 'questions': [], 'current_q': []}
+            clean_marker_tags(element)
+            text = get_text_from_element(element)
+            text_upper = text.strip().upper()
+            if not text_upper: continue
+
+        # Phát hiện kết thúc nhóm [/G]
+        is_group_end = "[/G]" in text_upper
+        if is_group_end:
+            clean_marker_tags(element)
+            text = get_text_from_element(element)
+            text_upper = text.strip().upper()
+
         if current_zone in ["P1", "P2", "P3", "P4"]:
-            if re.match(r'^Câu\s+\d+[:.\s]?', text.strip(), re.IGNORECASE):
-                if current_block: parsed_data[current_zone].append({'xml': current_block})
-                current_block = [element]
-            else:
-                if current_block: 
-                    current_block.append(element)
+            is_question_start = re.match(r'^Câu\s+\d+[:.\s]?', text.strip(), re.IGNORECASE)
+            
+            if in_group:
+                if is_question_start:
+                    if current_group['current_q']:
+                        current_group['questions'].append({'xml': current_group['current_q']})
+                    current_group['current_q'] = [element]
                 else:
-                    parsed_data[f"{current_zone}_header"].append(element)
+                    if current_group['current_q']:
+                        current_group['current_q'].append(element)
+                    else:
+                        current_group['passage'].append(element)
+                
+                if is_group_end:
+                    if current_group['current_q']:
+                        current_group['questions'].append({'xml': current_group['current_q']})
+                    parsed_data[current_zone].append(current_group)
+                    in_group = False
+                    current_group = None
+            else:
+                if is_question_start:
+                    if current_block: parsed_data[current_zone].append({'xml': current_block})
+                    current_block = [element]
+                else:
+                    if current_block: 
+                        current_block.append(element)
+                    else:
+                        parsed_data[f"{current_zone}_header"].append(element)
 
     if current_block and current_zone in ["P1", "P2", "P3", "P4"]: parsed_data[current_zone].append({'xml': current_block})
     return parsed_data
@@ -271,7 +312,8 @@ def parse_docx(doc):
 def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
     pattern = r'^\s*(\*|∗)?\s*([A-D])\s*[.)](\*|∗)?' if zone_type == "P1" else r'^\s*(\*|∗)?\s*([a-d])\s*[.)](\*|∗)?'
     labels = ['A', 'B', 'C', 'D'] if zone_type == "P1" else ['a', 'b', 'c', 'd']
-    stem, options, current_opt = [], [], None
+    stem, options, current_opt = [], None, None
+    options = []
     
     for el in block:
         if el.tag.endswith('p'):
@@ -444,110 +486,118 @@ def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
 
 def shuffle_engine(doc, parsed_data, config_data):
     ans_key, errors = [], []
-    q_counter = 1
     
+    # 1. Xử lý nội dung (trộn đáp án, tách key P3) cho từng câu
     for z in ["P1", "P2", "P3", "P4"]:
         if z in ["P1", "P2", "P3"]:
-            for q_obj in parsed_data[z]:
-                q_text_short = get_text_from_element(q_obj['xml'][0]).strip()[:40] + "..."
-                if z in ["P1", "P2"]:
-                    new_block, ans, err = process_options_and_extract_p1_p2(doc, q_obj['xml'], z, q_text_short)
-                    q_obj['xml'] = new_block; q_obj['ans'] = ans
-                    if err: errors.append(err)
-                else:
-                    new_block, ans = [], None
-                    for el in q_obj['xml']:
-                        is_key_line = False
-                        if el.tag.endswith('p'):
-                            match = re.search(r'^\s*(?:Đáp án|ĐS|Key)\s*[:=]\s*(.*)', get_text_from_element(el).strip(), re.IGNORECASE)
-                            if match: ans = match.group(1).strip(); is_key_line = True
-                        if not is_key_line: new_block.append(el)
-                    q_obj['xml'] = new_block; q_obj['ans'] = ans or "..."
-                    if not ans: errors.append(f"{z} - {q_text_short} CHƯA có dòng đáp án (Key: 123).")
+            for idx, item in enumerate(parsed_data[z]):
+                questions = item['questions'] if item.get('type') == 'group' else [item]
+                for g_idx, q_obj in enumerate(questions):
+                    q_text_short = get_text_from_element(q_obj['xml'][0]).strip()[:40] + "..."
+                    if z in ["P1", "P2"]:
+                        new_block, ans, err = process_options_and_extract_p1_p2(doc, q_obj['xml'], z, q_text_short)
+                        q_obj['xml'] = new_block; q_obj['ans'] = ans
+                        if err:
+                            prefix = f"Vùng {z} (Câu thứ {idx + 1}"
+                            if item.get('type') == 'group': prefix += f", tiểu mục {g_idx + 1}"
+                            prefix += " máy nhận diện)"
+                            errors.append(err.replace(f"{z} - ", f"{prefix} - "))
+                    elif z == "P3":
+                        new_block, ans = [], None
+                        for el in q_obj['xml']:
+                            is_key_line = False
+                            if el.tag.endswith('p'):
+                                match = re.search(r'^\s*(?:Đáp án|ĐS|Key)\s*[:=]\s*(.*)', get_text_from_element(el).strip(), re.IGNORECASE)
+                                if match: ans = match.group(1).strip(); is_key_line = True
+                            if not is_key_line: new_block.append(el)
+                        q_obj['xml'] = new_block; q_obj['ans'] = ans or "..."
+                        if not ans:
+                            prefix = f"Vùng {z} (Câu thứ {idx + 1}"
+                            if item.get('type') == 'group': prefix += f", tiểu mục {g_idx + 1}"
+                            prefix += " máy nhận diện)"
+                            errors.append(f"{prefix} - {q_text_short} CHƯA có dòng đáp án (Key: 123).")
                 
-            random.shuffle(parsed_data[z])
-        
-        for index, q_dict in enumerate(parsed_data[z]):
-            first_paragraph = q_dict['xml'][0] 
-            p_text = get_text_from_element(first_paragraph)
+                # Trộn các câu hỏi BÊN TRONG nhóm
+                if item.get('type') == 'group':
+                    random.shuffle(item['questions'])
             
-            match = re.search(r'^(\s*)(Câu\s+\d+)([\s:.\-\)]*)', p_text, re.IGNORECASE)
-            if match:
-                leading_spaces = match.group(1)
-                full_match_str = match.group(0) 
-                chars_to_remove = len(full_match_str)
-                
-                has_stripped_remainder = False
-                for run in first_paragraph.findall('.//w:r', namespaces=WORD_NS):
-                    t_node = run.find('w:t', namespaces=WORD_NS)
-                    if t_node is not None and t_node.text:
-                        if chars_to_remove > 0:
-                            run_text_len = len(t_node.text)
-                            if run_text_len <= chars_to_remove:
-                                chars_to_remove -= run_text_len
-                                t_node.text = ""
-                            else:
-                                t_node.text = t_node.text[chars_to_remove:].lstrip()
-                                chars_to_remove = 0
-                                if t_node.text: has_stripped_remainder = True
-                        elif not has_stripped_remainder:
-                            stripped = t_node.text.lstrip()
-                            t_node.text = stripped
-                            if t_node.text: has_stripped_remainder = True
+            # Trộn thứ tự các câu/nhóm trong vùng
+            random.shuffle(parsed_data[z])
 
-                # ========================================================
-                # [FIX GAPS]: DIỆT SẠCH TAB VÀ THỤT LỀ Ở CÂU HỎI
-                # ========================================================
-                for run in first_paragraph.findall('.//w:r', namespaces=WORD_NS):
-                    for tab in run.findall('.//w:tab', namespaces=WORD_NS):
-                        run.remove(tab)
-                pPr_q = first_paragraph.find(f'{{{WORD_NS["w"]}}}pPr')
-                if pPr_q is not None:
-                    ind = pPr_q.find(f'{{{WORD_NS["w"]}}}ind')
-                    if ind is not None: pPr_q.remove(ind)
-                # ========================================================
+    # 2. Đánh số thứ tự và tạo ans_key
+    global_q_counter = 1
+    for z in ["P1", "P2", "P3", "P4"]:
+        zone_q_counter = 1
+        for item in parsed_data[z]:
+            questions = item['questions'] if item.get('type') == 'group' else [item]
+            for q_dict in questions:
+                first_paragraph = q_dict['xml'][0] 
+                p_text = get_text_from_element(first_paragraph)
                 
-                if config_data.get("resetChiSo", True):
-                    new_label = f'{config_data.get("nhanCau", "Câu")} {index + 1}'
-                else:
-                    num_match = re.search(r'\d+', match.group(2))
-                    match_num = num_match.group() if num_match else str(index + 1)
-                    new_label = f'{config_data.get("nhanCau", "Câu")} {match_num}'
+                match = re.search(r'^(\s*)(Câu\s+\d+)([\s:.\-\)]*)', p_text, re.IGNORECASE)
+                if match:
+                    leading_spaces = match.group(1)
+                    full_match_str = match.group(0) 
+                    chars_to_remove = len(full_match_str)
+                    
+                    # Xóa nhãn câu cũ
+                    has_stripped_remainder = False
+                    for run in first_paragraph.findall('.//w:r', namespaces=WORD_NS):
+                        t_node = run.find('w:t', namespaces=WORD_NS)
+                        if t_node is not None and t_node.text:
+                            if chars_to_remove > 0:
+                                run_text_len = len(t_node.text)
+                                if run_text_len <= chars_to_remove:
+                                    chars_to_remove -= run_text_len
+                                    t_node.text = ""
+                                else:
+                                    t_node.text = t_node.text[chars_to_remove:].lstrip()
+                                    chars_to_remove = 0
+                                    if t_node.text: has_stripped_remainder = True
+                            elif not has_stripped_remainder:
+                                stripped = t_node.text.lstrip()
+                                t_node.text = stripped
+                                if t_node.text: has_stripped_remainder = True
+
+                    # Xóa tab/thụt lề
+                    for run in first_paragraph.findall('.//w:r', namespaces=WORD_NS):
+                        for tab in run.findall('.//w:tab', namespaces=WORD_NS): run.remove(tab)
+                    pPr_q = first_paragraph.find(f'{{{WORD_NS["w"]}}}pPr')
+                    if pPr_q is not None:
+                        ind = pPr_q.find(f'{{{WORD_NS["w"]}}}ind')
+                        if ind is not None: pPr_q.remove(ind)
+                    
+                    # Chèn nhãn câu mới
+                    if config_data.get("resetChiSo", True):
+                        new_label_num = zone_q_counter
+                    else:
+                        num_match = re.search(r'\d+', match.group(2))
+                        new_label_num = num_match.group() if num_match else zone_q_counter
+                    
+                    new_label = f'{config_data.get("nhanCau", "Câu")} {new_label_num}'
+                    
+                    new_run = OxmlElement('w:r')
+                    rPr = OxmlElement('w:rPr')
+                    b = OxmlElement('w:b'); bCs = OxmlElement('w:bCs')
+                    rPr.append(b); rPr.append(bCs)
+                    rFonts = OxmlElement('w:rFonts')
+                    rFonts.set(qn('w:ascii'), 'Times New Roman'); rFonts.set(qn('w:hAnsi'), 'Times New Roman'); rFonts.set(qn('w:cs'), 'Times New Roman')
+                    rPr.append(rFonts)
+                    new_run.append(rPr)
+                    t = OxmlElement('w:t'); t.set(qn('xml:space'), 'preserve')
+                    t.text = f"{leading_spaces}{new_label}: "
+                    new_run.append(t)
+                    
+                    pPr = first_paragraph.find(f'{{{WORD_NS["w"]}}}pPr')
+                    if pPr is not None: pPr.addnext(new_run)
+                    else: first_paragraph.insert(0, new_run)
                 
-                separator = ':'
+                if z in ["P1", "P2", "P3"]:
+                    score = "0.25" if z == "P1" else ("0.1 0.25 0.5 1" if z == "P2" else "0.5")
+                    ans_key.append({'q_num': global_q_counter, 'ans': q_dict.get('ans', '...'), 'score': score, 'zone': z})
+                    global_q_counter += 1
                 
-                new_run = OxmlElement('w:r')
-                rPr = OxmlElement('w:rPr')
-                
-                b = OxmlElement('w:b')
-                bCs = OxmlElement('w:bCs')
-                rPr.append(b)
-                rPr.append(bCs)
-                
-                rFonts = OxmlElement('w:rFonts')
-                rFonts.set(qn('w:ascii'), 'Times New Roman')
-                rFonts.set(qn('w:hAnsi'), 'Times New Roman')
-                rFonts.set(qn('w:cs'), 'Times New Roman')
-                rPr.append(rFonts)
-                
-                new_run.append(rPr)
-                
-                t = OxmlElement('w:t')
-                t.set(qn('xml:space'), 'preserve')
-                t.text = f"{leading_spaces}{new_label}{separator} "
-                new_run.append(t)
-                
-                pPr = first_paragraph.find(f'{{{WORD_NS["w"]}}}pPr')
-                if pPr is not None:
-                    pPr.addnext(new_run)
-                else:
-                    first_paragraph.insert(0, new_run)
-        
-        if z in ["P1", "P2", "P3"]:
-            for q_obj in parsed_data[z]:
-                score = "0.25" if z == "P1" else ("0.1 0.25 0.5 1" if z == "P2" else "0.5")
-                ans_key.append({'q_num': q_counter, 'ans': q_obj['ans'], 'score': score, 'zone': z})
-                q_counter += 1
+                zone_q_counter += 1
 
     return parsed_data, ans_key, errors
 
@@ -618,7 +668,12 @@ def render_template(doc, parsed_data, config_data, current_ma_de):
             body.append(el)
             
         for q_obj in parsed_data[z]:
-            for el in q_obj['xml']: body.append(el)
+            if q_obj.get('type') == 'group':
+                for el in q_obj['passage']: body.append(el)
+                for gq in q_obj['questions']:
+                    for el in gq['xml']: body.append(el)
+            else:
+                for el in q_obj['xml']: body.append(el)
 
     temp_doc = Document()
     temp_doc.add_paragraph() 
