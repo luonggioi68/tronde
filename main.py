@@ -677,8 +677,13 @@ def shuffle_engine(doc, parsed_data, config_data):
                         if err:
                             errors.append(f"Vùng {z} DK (câu thứ {dk_idx+1}) - {err}")
             
-            # Trộn thứ tự các câu/nhóm trong vùng (giữ DK ở đầu/cuối để khỏi phá vỡ đoạn văn)
-            random.shuffle(parsed_data[z])
+            # Trộn thứ tự các câu/nhóm trong vùng
+            # DK block giữ nguyên vị trí tương đối (không trộn lẫn với câu khác)
+            dk_items = [it for it in parsed_data[z] if it.get('type') == 'dk']
+            non_dk_items = [it for it in parsed_data[z] if it.get('type') != 'dk']
+            random.shuffle(non_dk_items)
+            # Ghép lại: DK đặt sau các câu đơn (giữ theo thứ tự ban đầu)
+            parsed_data[z] = non_dk_items + dk_items
 
     # 2. Đánh số thứ tự và tạo ans_key
     global_q_counter = 1
@@ -695,7 +700,7 @@ def shuffle_engine(doc, parsed_data, config_data):
                 first_paragraph = q_dict['xml'][0] 
                 p_text = get_text_from_element(first_paragraph)
                 
-                match = re.search(r'^(\s*)(Câu\s+\d+)([\s:.\-\)]*)', p_text, re.IGNORECASE)
+                match = re.search(r'^(\s*)((?:Câu|Question)\s+\d+)([\s:.\-\)]*)', p_text, re.IGNORECASE)
                 if match:
                     leading_spaces = match.group(1)
                     full_match_str = match.group(0) 
