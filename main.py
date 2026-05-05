@@ -233,6 +233,8 @@ def parse_docx(doc):
     current_block = []
     in_group = False
     current_group = None
+    in_dk = False
+    current_dk = None
 
     for element in body:
         text = get_text_from_element(element)
@@ -254,13 +256,16 @@ def parse_docx(doc):
             if current_block and current_zone in parsed_data: parsed_data[current_zone].append({'xml': current_block})
             current_zone, current_block = "P4", []; clean_marker_tags(element); parsed_data["P4_header"].append(element); continue
 
-        # Phát hiện bắt đầu nhóm [G]
-        if "[G]" in text_upper:
+        # Phát hiện bắt đầu nhóm [G] hoặc [G:tiêu đề]
+        g_match = re.search(r'\[G(?::([^\]]*?))?\]', text, re.IGNORECASE)
+        if g_match:
             if current_block and current_zone in parsed_data:
                 parsed_data[current_zone].append({'xml': current_block})
                 current_block = []
             in_group = True
-            current_group = {'type': 'group', 'passage': [], 'questions': [], 'current_q': []}
+            # Lấy tiêu đề nhóm nếu có, ví dụ [G:Đọc văn bản sau]
+            passage_title = g_match.group(1).strip() if g_match.group(1) else None
+            current_group = {'type': 'group', 'passage': [], 'questions': [], 'current_q': [], 'passage_title': passage_title}
             clean_marker_tags(element)
             text = get_text_from_element(element)
             text_upper = text.strip().upper()
@@ -269,6 +274,27 @@ def parse_docx(doc):
         # Phát hiện kết thúc nhóm [/G]
         is_group_end = "[/G]" in text_upper
         if is_group_end:
+            clean_marker_tags(element)
+            text = get_text_from_element(element)
+            text_upper = text.strip().upper()
+
+        # Phát hiện [DK] hoặc [DK:tiêu đề]
+        dk_match = re.search(r'\[DK(?::([^\]]*?))?\]', text, re.IGNORECASE)
+        if dk_match and not in_group:
+            if current_block and current_zone in parsed_data:
+                parsed_data[current_zone].append({'xml': current_block})
+                current_block = []
+            in_dk = True
+            dk_title = dk_match.group(1).strip() if dk_match.group(1) else None
+            current_dk = {'type': 'dk', 'passage': [], 'questions': [], 'current_q': [], 'passage_title': dk_title}
+            clean_marker_tags(element)
+            text = get_text_from_element(element)
+            text_upper = text.strip().upper()
+            if not text_upper: continue
+
+        # Phát hiện kết thúc [/DK]
+        is_dk_end = "[/DK]" in text_upper
+        if is_dk_end:
             clean_marker_tags(element)
             text = get_text_from_element(element)
             text_upper = text.strip().upper()
@@ -293,6 +319,22 @@ def parse_docx(doc):
                     parsed_data[current_zone].append(current_group)
                     in_group = False
                     current_group = None
+            elif in_dk:
+                is_dk_q_start = re.match(r'^(?:Câu|Question)\s+\d+[:.\s]?', text.strip(), re.IGNORECASE)
+                if is_dk_q_start:
+                    if current_dk['current_q']:
+                        current_dk['questions'].append({'xml': current_dk['current_q']})
+                    current_dk['current_q'] = [element]
+                else:
+                    if current_dk['current_q']:
+                        current_dk['current_q'].append(element)
+                    else:
+                        current_dk['passage'].append(element)
+                if is_dk_end:
+                    if current_dk['current_q']:
+                        current_dk['questions'].append({'xml': current_dk['current_q']})
+                    parsed_data[current_zone].append(current_dk)
+                    in_dk = False; current_dk = None
             else:
                 if is_question_start:
                     if current_block: parsed_data[current_zone].append({'xml': current_block})
@@ -484,16 +526,76 @@ def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
 
     return new_block, ans_result or "A", None
 
+def process_dk_options(block, q_text_short):
+    """Shuffle A/B/C/D cho 1 câu điền khuyết. Options có thể inline hoặc tách dòng."""
+    labels = ['A', 'B', 'C', 'D']
+    # Tìm paragraph chứa >= 3 options A/B/C/D
+    opt_para_idx = None
+    for i, el in enumerate(block):
+        if el.tag.endswith('p'):
+            text = get_text_from_element(el)
+            if len(set(re.findall(r'\b([A-D])\s*[.)]', text))) >= 3:
+                opt_para_idx = i; break
+    if opt_para_idx is None:
+        return block, "A", f"DK - {q_text_short}: Không tìm thấy đáp án A/B/C/D inline."
+    opt_para = block[opt_para_idx]
+    full_text = get_text_from_element(opt_para)
+    # Tách phần trước options và phần options
+    first_opt = re.search(r'(\*|∗)?\s*[A-D]\s*[.)]', full_text)
+    if not first_opt:
+        return block, "A", f"DK - {q_text_short}: Lỗi phân tích đáp án."
+    stem_text = full_text[:first_opt.start()].rstrip()
+    opts_text = full_text[first_opt.start():]
+    # Parse từng option
+    matches = list(re.finditer(r'(\*|∗)?\s*([A-D])\s*[.)](∗|\*)?\s*(.*?)(?=\s*(?:\*|∗)?\s*[A-D]\s*[.)]|$)', opts_text, re.DOTALL))
+    if len(matches) < 4:
+        return block, "A", f"DK - {q_text_short}: Cần đủ 4 đáp án A/B/C/D."
+    options = []
+    for m in matches[:4]:
+        is_correct = bool(m.group(1) or m.group(3))
+        content = m.group(4).strip()
+        if re.search(r'\(đ(?:úng)?\)', content, re.IGNORECASE):
+            is_correct = True
+            content = re.sub(r'\(đ(?:úng)?\)', '', content, flags=re.IGNORECASE).strip()
+        options.append({'text': content, 'is_correct': is_correct})
+    # Kiểm tra đánh dấu màu/gạch chân trong runs
+    for run in opt_para.findall('.//w:r', namespaces=WORD_NS):
+        if check_and_clean_answer_formatting(run):
+            rt = ''.join(n.text for n in run.iter() if n.tag.endswith('t') and n.text)
+            for opt in options:
+                if opt['text'] and rt and rt.strip() and opt['text'].startswith(rt.strip()[:5]):
+                    opt['is_correct'] = True
+    correct_count = sum(1 for o in options if o['is_correct'])
+    if correct_count == 0:
+        return block, "A", f"DK - {q_text_short}: Chưa có đáp án đúng (dùng dấu * trước chữ cái, vd: *A.)."
+    random.shuffle(options)
+    ans = next((labels[i] for i, o in enumerate(options) if o['is_correct']), "A")
+    # Rebuild paragraph: ghi lại text options đã trộn
+    opts_rebuilt = "    ".join(f"{labels[i]}. {o['text']}" for i, o in enumerate(options))
+    new_text = (stem_text + "  " + opts_rebuilt).strip() if stem_text else opts_rebuilt
+    runs = opt_para.findall('.//w:r', namespaces=WORD_NS)
+    if runs:
+        t = runs[0].find('w:t', namespaces=WORD_NS)
+        if t is None: t = OxmlElement('w:t'); runs[0].append(t)
+        t.set(qn('xml:space'), 'preserve'); t.text = new_text
+        for run in runs[1:]:
+            t2 = run.find('w:t', namespaces=WORD_NS)
+            if t2 is not None: t2.text = ""
+    return block, ans, None
+
 def shuffle_engine(doc, parsed_data, config_data):
+
     ans_key, errors = [], []
     
     # 1. Xử lý nội dung (trộn đáp án, tách key P3) cho từng câu
     for z in ["P1", "P2", "P3", "P4"]:
         if z in ["P1", "P2", "P3"]:
             for idx, item in enumerate(parsed_data[z]):
-                questions = item['questions'] if item.get('type') == 'group' else [item]
+                questions = item['questions'] if item.get('type') in ('group', 'dk') else [item]
                 for g_idx, q_obj in enumerate(questions):
                     q_text_short = get_text_from_element(q_obj['xml'][0]).strip()[:40] + "..."
+                    # Bỏ qua xử lý thông thường cho DK (DK có hàm riêng xử lý sau)
+                    if item.get('type') == 'dk': continue
                     if z in ["P1", "P2"]:
                         new_block, ans, err = process_options_and_extract_p1_p2(doc, q_obj['xml'], z, q_text_short)
                         q_obj['xml'] = new_block; q_obj['ans'] = ans
@@ -520,8 +622,16 @@ def shuffle_engine(doc, parsed_data, config_data):
                 # Trộn các câu hỏi BÊN TRONG nhóm
                 if item.get('type') == 'group':
                     random.shuffle(item['questions'])
+                # DK: chỉ shuffle options, GIỮ nguyên thứ tự câu
+                elif item.get('type') == 'dk' and z in ["P1", "P2"]:
+                    for dk_idx, dk_q in enumerate(item['questions']):
+                        dk_q_text = get_text_from_element(dk_q['xml'][0]).strip()[:40] + "..."
+                        new_block, ans, err = process_dk_options(dk_q['xml'], dk_q_text)
+                        dk_q['xml'] = new_block; dk_q['ans'] = ans
+                        if err:
+                            errors.append(f"Vùng {z} DK (câu thứ {dk_idx+1}) - {err}")
             
-            # Trộn thứ tự các câu/nhóm trong vùng
+            # Trộn thứ tự các câu/nhóm trong vùng (giữ DK ở đầu/cuối để khỏi phá vỡ đoạn văn)
             random.shuffle(parsed_data[z])
 
     # 2. Đánh số thứ tự và tạo ans_key
@@ -529,7 +639,12 @@ def shuffle_engine(doc, parsed_data, config_data):
     for z in ["P1", "P2", "P3", "P4"]:
         zone_q_counter = 1
         for item in parsed_data[z]:
-            questions = item['questions'] if item.get('type') == 'group' else [item]
+            questions = item['questions'] if item.get('type') in ('group', 'dk') else [item]
+            
+            # Ghi nhận câu bắt đầu của nhóm (dùng cho tiêu đề đọc hiểu)
+            if item.get('type') in ('group', 'dk'):
+                item['q_start'] = global_q_counter if z in ["P1", "P2", "P3"] else None
+            
             for q_dict in questions:
                 first_paragraph = q_dict['xml'][0] 
                 p_text = get_text_from_element(first_paragraph)
@@ -598,6 +713,10 @@ def shuffle_engine(doc, parsed_data, config_data):
                     global_q_counter += 1
                 
                 zone_q_counter += 1
+            
+            # Ghi nhận câu kết thúc của nhóm
+            if item.get('type') in ('group', 'dk') and z in ["P1", "P2", "P3"]:
+                item['q_end'] = global_q_counter - 1
 
     return parsed_data, ans_key, errors
 
@@ -668,7 +787,33 @@ def render_template(doc, parsed_data, config_data, current_ma_de):
             body.append(el)
             
         for q_obj in parsed_data[z]:
-            if q_obj.get('type') == 'group':
+            if q_obj.get('type') in ('group', 'dk'):
+                q_start = q_obj.get('q_start')
+                q_end = q_obj.get('q_end')
+                passage_title = q_obj.get('passage_title')
+                if q_start is not None and q_end is not None:
+                    heading_doc = Document()
+                    if q_obj.get('type') == 'dk':
+                        if passage_title:
+                            heading_text = f"{passage_title} (câu {q_start} đến câu {q_end}):"
+                        else:
+                            heading_text = f"Đọc đoạn văn sau và chọn phương án đến điền vào chỗ trống (đáp án từ câu {q_start} đến câu {q_end}):"
+                    else:
+                        if passage_title:
+                            heading_text = f"{passage_title} (câu {q_start} đến câu {q_end}):"
+                        else:
+                            heading_text = f"Đọc đoạn văn sau và trả lời các câu từ câu {q_start} đến câu {q_end}:"
+                    p_heading = heading_doc.add_paragraph()
+                    p_heading.paragraph_format.space_before = Pt(6)
+                    p_heading.paragraph_format.space_after = Pt(2)
+                    r_heading = p_heading.add_run(heading_text)
+                    r_heading.bold = True; r_heading.italic = True
+                    r_heading.font.name = 'Times New Roman'; r_heading.font.size = Pt(12)
+                    rPr_h = r_heading._element.get_or_add_rPr(); rFonts_h = rPr_h.get_or_add_rFonts()
+                    rFonts_h.set(qn('w:ascii'), 'Times New Roman')
+                    rFonts_h.set(qn('w:hAnsi'), 'Times New Roman')
+                    rFonts_h.set(qn('w:cs'), 'Times New Roman')
+                    body.append(p_heading._element)
                 for el in q_obj['passage']: body.append(el)
                 for gq in q_obj['questions']:
                     for el in gq['xml']: body.append(el)
