@@ -526,7 +526,7 @@ def process_options_and_extract_p1_p2(doc, block, zone_type, question_text):
 
     return new_block, ans_result or "A", None
 
-def process_dk_options(block, q_text_short):
+def process_dk_options(doc, block, q_text_short):
     """Shuffle A/B/C/D cho 1 câu điền khuyết. Options có thể inline hoặc tách dòng."""
     labels = ['A', 'B', 'C', 'D']
     # Tìm paragraph chứa >= 3 options A/B/C/D
@@ -570,21 +570,64 @@ def process_dk_options(block, q_text_short):
         return block, "A", f"DK - {q_text_short}: Chưa có đáp án đúng (dùng dấu * trước chữ cái, vd: *A.)."
     random.shuffle(options)
     ans = next((labels[i] for i, o in enumerate(options) if o['is_correct']), "A")
-    # Rebuild paragraph: ghi lại text options đã trộn
-    opts_rebuilt = "    ".join(f"{labels[i]}. {o['text']}" for i, o in enumerate(options))
-    new_text = (stem_text + "  " + opts_rebuilt).strip() if stem_text else opts_rebuilt
-    runs = opt_para.findall('.//w:r', namespaces=WORD_NS)
-    if runs:
-        t = runs[0].find('w:t', namespaces=WORD_NS)
-        if t is None: t = OxmlElement('w:t'); runs[0].append(t)
-        t.set(qn('xml:space'), 'preserve'); t.text = new_text
-        for run in runs[1:]:
+    # Cập nhật stem paragraph: giữ nguyên phần trước A., xóa phần options cũ
+    runs_p = opt_para.findall('.//w:r', namespaces=WORD_NS)
+    if runs_p:
+        t0 = runs_p[0].find('w:t', namespaces=WORD_NS)
+        if t0 is None: t0 = OxmlElement('w:t'); runs_p[0].append(t0)
+        t0.set(qn('xml:space'), 'preserve'); t0.text = stem_text
+        for run in runs_p[1:]:
             t2 = run.find('w:t', namespaces=WORD_NS)
             if t2 is not None: t2.text = ""
-    # Xóa bold cho toàn bộ paragraph đáp án sau khi rebuild
-    for run in opt_para.findall('.//w:r', namespaces=WORD_NS):
-        remove_bold(run)
-    return block, ans, None
+
+    # Tạo paragraph riêng cho mỗi đáp án
+    def make_opt_p(label, text):
+        new_p = OxmlElement('w:p')
+        new_r = OxmlElement('w:r')
+        rPr = OxmlElement('w:rPr')
+        rFonts = OxmlElement('w:rFonts')
+        rFonts.set(qn('w:ascii'), 'Times New Roman')
+        rFonts.set(qn('w:hAnsi'), 'Times New Roman')
+        rFonts.set(qn('w:cs'), 'Times New Roman')
+        rPr.append(rFonts); new_r.append(rPr)
+        t = OxmlElement('w:t'); t.set(qn('xml:space'), 'preserve')
+        t.text = f"{label}. {text}"
+        new_r.append(t); new_p.append(new_r)
+        return new_p
+
+    opt_elements = [make_opt_p(labels[i], o['text']) for i, o in enumerate(options)]
+
+    # Xác định layout theo độ dài
+    max_len = max(len(o['text']) for o in options)
+    has_complex = analyze_complexity(opt_para)
+    if has_complex: layout = 2 if max_len <= 20 else 1
+    elif max_len <= 12: layout = 4
+    elif max_len <= 45: layout = 2
+    else: layout = 1
+
+    stem_block = list(block[:opt_para_idx]) + [opt_para]
+
+    if layout == 1:
+        return stem_block + opt_elements, ans, None
+    elif layout == 2:
+        table = create_invisible_table(doc, 2, 2)
+        tbl_el = table._tbl; tbl_el.getparent().remove(tbl_el)
+        for idx in range(4):
+            cell = table.cell(idx // 2, idx % 2)
+            cell._element.remove(cell.paragraphs[0]._element)
+            clean_paragraph_for_table(opt_elements[idx])
+            cell._element.append(opt_elements[idx])
+        return stem_block + [tbl_el], ans, None
+    else:  # layout == 4
+        table = create_invisible_table(doc, 1, 4)
+        tbl_el = table._tbl; tbl_el.getparent().remove(tbl_el)
+        for idx in range(4):
+            cell = table.cell(0, idx)
+            cell._element.remove(cell.paragraphs[0]._element)
+            clean_paragraph_for_table(opt_elements[idx])
+            cell._element.append(opt_elements[idx])
+        return stem_block + [tbl_el], ans, None
+
 
 def shuffle_engine(doc, parsed_data, config_data):
 
@@ -629,7 +672,7 @@ def shuffle_engine(doc, parsed_data, config_data):
                 elif item.get('type') == 'dk' and z in ["P1", "P2"]:
                     for dk_idx, dk_q in enumerate(item['questions']):
                         dk_q_text = get_text_from_element(dk_q['xml'][0]).strip()[:40] + "..."
-                        new_block, ans, err = process_dk_options(dk_q['xml'], dk_q_text)
+                        new_block, ans, err = process_dk_options(doc, dk_q['xml'], dk_q_text)
                         dk_q['xml'] = new_block; dk_q['ans'] = ans
                         if err:
                             errors.append(f"Vùng {z} DK (câu thứ {dk_idx+1}) - {err}")
