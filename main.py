@@ -75,8 +75,8 @@ def check_and_clean_answer_formatting(run_element):
 
 def clean_marker_tags(element):
     text = get_text_from_element(element)
-    if re.search(r'\[P[1-4]\]|\[G\]|\[/G\]', text, re.IGNORECASE):
-        cleaned_text = re.sub(r'\[P[1-4]\]\s*|\[G\]\s*|\[/G\]\s*', '', text, flags=re.IGNORECASE)
+    if re.search(r'\[P[1-4]\]|\[G\]|\[/G\]|\[DK(?::[^\]]*)?\]|\[/DK\]', text, re.IGNORECASE):
+        cleaned_text = re.sub(r'\[P[1-4]\]\s*|\[G(?::[^\]]*)?\]\s*|\[/G\]\s*|\[DK(?::[^\]]*)?\]\s*|\[/DK\]\s*', '', text, flags=re.IGNORECASE)
         runs = element.findall('.//w:r', namespaces=WORD_NS)
         first = True
         for run in runs:
@@ -581,6 +581,9 @@ def process_dk_options(block, q_text_short):
         for run in runs[1:]:
             t2 = run.find('w:t', namespaces=WORD_NS)
             if t2 is not None: t2.text = ""
+    # Xóa bold cho toàn bộ paragraph đáp án sau khi rebuild
+    for run in opt_para.findall('.//w:r', namespaces=WORD_NS):
+        remove_bold(run)
     return block, ans, None
 
 def shuffle_engine(doc, parsed_data, config_data):
