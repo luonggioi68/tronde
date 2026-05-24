@@ -243,16 +243,23 @@ def parse_docx(doc):
         if text_upper in ["HẾT", "---HẾT---", "HẾT.", "-HẾT-", "HẾT"]:
             continue
 
-        if "[P1]" in text_upper or re.search(r'\bPHẦN\s+(I|1|MỘT)\b', text_upper):
+        # --- Nhận diện phần: ưu tiên marker [P1]-[P4] trước, fallback sang regex PHẦN I/II/III/IV ---
+        has_p1_marker = "[P1]" in text_upper
+        has_p2_marker = "[P2]" in text_upper
+        has_p3_marker = "[P3]" in text_upper
+        has_p4_marker = "[P4]" in text_upper
+        has_any_marker = has_p1_marker or has_p2_marker or has_p3_marker or has_p4_marker
+
+        if has_p1_marker or (not has_any_marker and re.search(r'\bPHẦN\s+(I|1|MỘT)\b', text_upper)):
             if current_block and current_zone in parsed_data: parsed_data[current_zone].append({'xml': current_block})
             current_zone, current_block = "P1", []; clean_marker_tags(element); parsed_data["P1_header"].append(element); continue
-        elif "[P2]" in text_upper or re.search(r'\bPHẦN\s+(II|2|HAI)\b', text_upper):
+        elif has_p2_marker or (not has_any_marker and re.search(r'\bPHẦN\s+(II|2|HAI)\b', text_upper)):
             if current_block and current_zone in parsed_data: parsed_data[current_zone].append({'xml': current_block})
             current_zone, current_block = "P2", []; clean_marker_tags(element); parsed_data["P2_header"].append(element); continue
-        elif "[P3]" in text_upper or re.search(r'\bPHẦN\s+(III|3|BA)\b', text_upper):
+        elif has_p3_marker or (not has_any_marker and re.search(r'\bPHẦN\s+(III|3|BA)\b', text_upper)):
             if current_block and current_zone in parsed_data: parsed_data[current_zone].append({'xml': current_block})
             current_zone, current_block = "P3", []; clean_marker_tags(element); parsed_data["P3_header"].append(element); continue
-        elif "[P4]" in text_upper or re.search(r'\bPHẦN\s+(IV|4|BỐN)\b', text_upper):
+        elif has_p4_marker or (not has_any_marker and re.search(r'\bPHẦN\s+(IV|4|BỐN)\b', text_upper)):
             if current_block and current_zone in parsed_data: parsed_data[current_zone].append({'xml': current_block})
             current_zone, current_block = "P4", []; clean_marker_tags(element); parsed_data["P4_header"].append(element); continue
 
